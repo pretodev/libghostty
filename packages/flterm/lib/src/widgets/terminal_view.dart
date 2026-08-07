@@ -330,11 +330,12 @@ class _TerminalViewState extends State<TerminalView> {
                     onLinkActivate: widget.linkSettings.onActivate,
                     child: Scrollable(
                       controller: _scrollController,
-                      // Com mouse tracking (TUIs como claude/vim) o wheel é
-                      // encaminhado ao app pelo gesture detector; o scroll do
-                      // viewport é desligado pra os dois não disputarem o
-                      // pointer signal (o que fazia o scroll interno do app não
-                      // funcionar). No alt-buffer não há scrollback pra rolar.
+                      // Under mouse tracking (TUIs like claude/vim) the gesture
+                      // detector forwards the wheel to the app, so viewport
+                      // scrolling is turned off to keep the two from contending
+                      // for the same pointer signal — that contention was what
+                      // broke the app's own scrolling. The alt screen has no
+                      // scrollback to scroll anyway.
                       physics: _controller.mouseTracking != .none
                           ? const NeverScrollableScrollPhysics()
                           : widget.scrollPhysics,

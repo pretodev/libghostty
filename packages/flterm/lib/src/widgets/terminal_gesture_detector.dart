@@ -63,14 +63,15 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
       onPointerDown: tracked ? _handleTrackedDown : null,
       onPointerMove: tracked ? _handleTrackedMove : null,
       onPointerUp: tracked ? _handleTrackedUp : null,
-      // Wheel com mouse tracking ligado (TUIs como claude/vim no alt-buffer) tem
-      // que virar reporte de mouse pro app, não rolar o scrollback do viewport.
-      // Sem isso o `Scrollable` filho engole o wheel (e no alt-buffer não há
-      // scrollback), então o scroll interno do app não funciona. O `Scrollable`
-      // é neutralizado (`NeverScrollableScrollPhysics`) nesse modo no
-      // `TerminalView`, evitando dois consumidores disputando o pointer signal.
+      // With mouse tracking on (TUIs like claude/vim on the alt screen), the
+      // wheel must be reported to the app instead of scrolling the viewport
+      // scrollback. Otherwise the child `Scrollable` swallows the wheel (and
+      // the alt screen has no scrollback), so the app's own scrolling never
+      // works. That `Scrollable` is disabled (`NeverScrollableScrollPhysics`)
+      // in this mode by `TerminalView`, so the two never contend for the same
+      // pointer signal.
       onPointerSignal: tracked ? _handlePointerSignal : null,
-      // macOS entrega o trackpad como pan/zoom; encaminha igual ao wheel.
+      // macOS delivers trackpad scrolling as pan/zoom; forward it like a wheel.
       onPointerPanZoomStart: tracked ? _handlePointerPanZoomStart : null,
       onPointerPanZoomUpdate: tracked ? _handlePointerPanZoomUpdate : null,
       child: TerminalRawGestureDetector(
@@ -287,20 +288,23 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
     ));
   }
 
-  /// Resíduo fracionário de linha ao encaminhar o wheel (trackpad manda deltas
-  /// pequenos e frequentes; acumulamos pra não rolar rápido demais).
+  /// Fractional line remainder left over while forwarding the wheel (the
+  /// trackpad sends small, frequent deltas; accumulating keeps the forwarded
+  /// scroll from running too fast).
   double _wheelAccum = 0;
 
-  /// Pan acumulado do gesto pan/zoom em curso (o [PointerPanZoomUpdateEvent.pan]
-  /// é acumulado desde o start; derivamos o delta por update).
+  /// Accumulated pan of the pan/zoom gesture in flight
+  /// ([PointerPanZoomUpdateEvent.pan] is cumulative since the start, so the
+  /// per-update delta is derived from it).
   Offset _panZoomLast = Offset.zero;
 
-  /// Wheel via [PointerSignalEvent] — mouse de verdade e, no macOS, o scroll
-  /// sintetizado do trackpad. Encaminha pro app como reporte de mouse.
+  /// Wheel arriving as a [PointerSignalEvent] — a real mouse and, on macOS, the
+  /// synthesized trackpad scroll. Forwarded to the app as a mouse report.
   void _handlePointerSignal(PointerSignalEvent event) {
     if (event is! PointerScrollEvent) return;
     if (!_isMouseTracked(HardwareKeyboard.instance.isShiftPressed)) return;
-    // Mouse = discreto (um notch por evento); trackpad = contínuo (acumula).
+    // Mouse is discrete (one notch per event); trackpad is continuous, so it
+    // accumulates.
     _forwardScroll(
       event.scrollDelta.dy,
       event.localPosition,
@@ -308,9 +312,9 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
     );
   }
 
-  // No macOS o trackpad muitas vezes chega como gesto **pan/zoom** (não como
-  // PointerScrollEvent), então sem tratar isso o scroll de dois dedos não
-  // encaminha nada pro app. Mesmo caminho de forward do wheel, contínuo.
+  // On macOS the trackpad often arrives as a pan/zoom gesture rather than a
+  // PointerScrollEvent, so without handling it two-finger scrolling forwards
+  // nothing to the app. Same forwarding path as the wheel, continuous mode.
   void _handlePointerPanZoomStart(PointerPanZoomStartEvent event) {
     _panZoomLast = Offset.zero;
     _wheelAccum = 0;
@@ -320,16 +324,20 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
     if (!_isMouseTracked(HardwareKeyboard.instance.isShiftPressed)) return;
     final dy = event.pan.dy - _panZoomLast.dy;
     _panZoomLast = event.pan;
-    // Pan tem sinal oposto ao scrollDelta (dedo pra cima = pan.dy negativo =
-    // ver conteúdo abaixo = scroll down); invertendo, reusa a convenção.
+    // Pan has the opposite sign of scrollDelta (finger up = negative pan.dy =
+    // reveal content below = scroll down); negating it reuses the convention.
     _forwardScroll(-dy, event.localPosition, discrete: false);
   }
 
-  /// Converte um delta vertical (px, convenção de `scrollDelta`) em passos de
-  /// linha e encaminha ao app como wheel (botão 4 = cima, 5 = baixo).
-  /// [discrete] = mouse (≥1 linha/notch, sem acumular); contínuo = trackpad.
-  void _forwardScroll(double deltaY, Offset localPosition,
-      {required bool discrete}) {
+  /// Converts a vertical delta (px, `scrollDelta` convention) into line steps
+  /// and forwards them to the app as wheel reports (button 4 = up, 5 = down).
+  /// [discrete] means a mouse (at least one line per notch, no accumulation);
+  /// otherwise the delta is continuous, as from a trackpad.
+  void _forwardScroll(
+    double deltaY,
+    Offset localPosition, {
+    required bool discrete,
+  }) {
     final cellHeight = widget.metrics.cellHeight;
     if (cellHeight <= 0) return;
     final lines = deltaY / cellHeight;
@@ -346,7 +354,7 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
       _wheelAccum -= steps;
     }
 
-    // dy < 0 = rolar pra cima = botão 4; > 0 = baixo = botão 5.
+    // dy < 0 = scroll up = button 4; dy > 0 = scroll down = button 5.
     final button = steps < 0 ? MouseButton.four : MouseButton.five;
     for (var i = 0; i < steps.abs(); i++) {
       _binding.handleMouseEvent((
