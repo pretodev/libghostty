@@ -95,10 +95,11 @@ final class CompileFromSource extends LibraryProvider {
   Future<void> _compile(Directory sourceDir, File target) async {
     final os = input.config.code.targetOS;
     final arch = input.config.code.targetArchitecture;
-    final ios = os == OS.iOS ? input.config.code.iOS.targetSdk : null;
+    final ios = os == .iOS ? input.config.code.iOS.targetSdk : null;
+    final iOSVersion = os == .iOS ? input.config.code.iOS.targetVersion : null;
 
     final installDir = target.parent.parent.uri;
-    final zig = zigTarget(os, arch, iOSSdk: ios);
+    final zig = zigTarget(os, arch, iOSSdk: ios, iOSVersion: iOSVersion);
     final zigCacheDir = os == .windows ? _zigCacheDir(sourceDir) : null;
 
     final zigArgs = [
@@ -108,7 +109,9 @@ final class CompileFromSource extends LibraryProvider {
       Directory.fromUri(installDir).path,
       '--release=fast',
       if (zigCacheDir != null) ...['--global-cache-dir', zigCacheDir],
-      if (os != .current || arch != .current) '-Dtarget=$zig',
+      // Pass -Dtarget so source-compiled libraries use the target CPU baseline
+      // instead of the build machine's CPU.
+      '-Dtarget=$zig',
       if (ios == .iPhoneSimulator && arch == .arm64) '-Dcpu=apple_a17',
     ];
 
@@ -116,12 +119,16 @@ final class CompileFromSource extends LibraryProvider {
       'zig',
       zigArgs,
       workingDirectory: sourceDir.path,
-      environment: zigCacheDir == null
-          ? null
-          : {
-              'ZIG_GLOBAL_CACHE_DIR': zigCacheDir,
-              'ZIG_LOCAL_CACHE_DIR': zigCacheDir,
-            },
+      environment: {
+        // Keep Ghostty's version detection from walking into the consuming
+        // repository. The absolute parent ceiling still allows a Ghostty
+        // checkout to use its own `.git`.
+        'GIT_CEILING_DIRECTORIES': sourceDir.parent.absolute.path,
+        if (zigCacheDir != null) ...{
+          'ZIG_GLOBAL_CACHE_DIR': zigCacheDir,
+          'ZIG_LOCAL_CACHE_DIR': zigCacheDir,
+        },
+      },
     );
 
     if (result.exitCode != 0) {

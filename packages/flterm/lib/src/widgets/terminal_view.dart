@@ -330,7 +330,15 @@ class _TerminalViewState extends State<TerminalView> {
                     onLinkActivate: widget.linkSettings.onActivate,
                     child: Scrollable(
                       controller: _scrollController,
-                      physics: widget.scrollPhysics,
+                      // Under mouse tracking (TUIs like claude/vim) the gesture
+                      // detector forwards the wheel to the app, so viewport
+                      // scrolling is turned off to keep the two from contending
+                      // for the same pointer signal — that contention was what
+                      // broke the app's own scrolling. The alt screen has no
+                      // scrollback to scroll anyway.
+                      physics: _controller.mouseTracking != .none
+                          ? const NeverScrollableScrollPhysics()
+                          : widget.scrollPhysics,
                       viewportBuilder: (_, offset) => TerminalRenderer(
                         key: _rendererKey,
                         theme: _theme,
