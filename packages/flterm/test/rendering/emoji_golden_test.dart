@@ -8,7 +8,7 @@ import 'dart:typed_data';
 
 import 'package:flterm/src/foundation.dart';
 import 'package:flterm/src/rendering.dart';
-import 'package:flterm/src/rendering/terminal_render_cache.dart';
+import 'package:flterm/src/rendering/atlas_pool.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -59,10 +59,10 @@ void main() {
       ],
     );
 
-    TerminalRenderCache renderCache() {
-      final cache = TerminalRenderCache();
-      addTearDown(cache.dispose);
-      return cache;
+    AtlasPool atlasPool() {
+      final pool = AtlasPool();
+      addTearDown(pool.dispose);
+      return pool;
     }
 
     void writeRawBytes(Terminal terminal, List<int> bytes) {
@@ -97,7 +97,10 @@ void main() {
       bool focused = true,
     }) async {
       selection?.applyTo(terminal);
+      final frameSource = FrameSource(terminal);
+      addTearDown(frameSource.dispose);
       final resolvedTheme = theme ?? emojiTheme;
+      applyTerminalTheme(terminal, resolvedTheme);
       final width = cols * metrics.cellWidth;
       final height = rows * metrics.cellHeight;
       tester.view.devicePixelRatio = 1.0;
@@ -115,12 +118,14 @@ void main() {
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: width, maxHeight: height),
               child: TerminalRenderer(
-                terminal: terminal,
+                frameSource: frameSource,
                 theme: resolvedTheme,
                 metrics: metrics,
                 offset: ViewportOffset.zero(),
-                renderCache: renderCache(),
-                renderObserver: _TestRenderObserver(hasFocus: focused),
+                atlasPool: atlasPool(),
+                focused: focused,
+                onGeometryChanged: (_) {},
+                onViewportRowChanged: (_) {},
               ),
             ),
           ),
@@ -295,7 +300,7 @@ void main() {
       });
     });
 
-    group('Cursor on emoji', () {
+    group('RenderStateCursor on emoji', () {
       testWidgets('block cursor on standard wide emoji', (tester) async {
         final terminal = Terminal(cols: defaultCols, rows: defaultRows);
         addTearDown(terminal.dispose);
@@ -448,17 +453,4 @@ void main() {
       });
     });
   });
-}
-
-class _TestRenderObserver implements TerminalRenderObserver {
-  @override
-  final bool hasFocus;
-
-  const _TestRenderObserver({this.hasFocus = true});
-
-  @override
-  void addListener(VoidCallback listener) {}
-
-  @override
-  void removeListener(VoidCallback listener) {}
 }

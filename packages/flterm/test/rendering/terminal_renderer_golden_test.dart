@@ -7,7 +7,7 @@ import 'dart:typed_data';
 import 'package:flterm/src/foundation.dart';
 import 'package:flterm/src/links/link_snapshot.dart';
 import 'package:flterm/src/rendering.dart';
-import 'package:flterm/src/rendering/terminal_render_cache.dart';
+import 'package:flterm/src/rendering/atlas_pool.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -59,10 +59,10 @@ void main() {
       return (0.299 * c.r * 255 + 0.587 * c.g * 255 + 0.114 * c.b * 255) < 128;
     }
 
-    TerminalRenderCache renderCache() {
-      final cache = TerminalRenderCache();
-      addTearDown(cache.dispose);
-      return cache;
+    AtlasPool atlasPool() {
+      final pool = AtlasPool();
+      addTearDown(pool.dispose);
+      return pool;
     }
 
     void writeUtf8(Terminal terminal, String text) {
@@ -80,9 +80,17 @@ void main() {
       bool blinkVisible = true,
       String preeditText = '',
       LinkSnapshot linkSnapshot = LinkSnapshot.empty,
-      OnResize? onResize,
+      ValueChanged<SurfaceMeasurement>? onGeometryChanged,
     }) {
+      final resolvedTheme =
+          theme ??
+          TerminalTheme.dark().copyWith(
+            fontFamilyFallback: bundledFontFamilyFallback,
+          );
+      applyTerminalTheme(terminal, resolvedTheme);
       selection?.applyTo(terminal);
+      final frameSource = FrameSource(terminal);
+      addTearDown(frameSource.dispose);
       final width = maxWidth ?? defaultCols * metrics.cellWidth;
       final height = maxHeight ?? defaultRows * metrics.cellHeight;
       return Directionality(
@@ -93,20 +101,29 @@ void main() {
             constraints: BoxConstraints(maxWidth: width, maxHeight: height),
             child: RepaintBoundary(
               child: TerminalRenderer(
-                terminal: terminal,
-                theme:
-                    theme ??
-                    TerminalTheme.dark().copyWith(
-                      fontFamilyFallback: bundledFontFamilyFallback,
-                    ),
+                frameSource: frameSource,
+                theme: resolvedTheme,
                 metrics: metrics,
                 offset: ViewportOffset.zero(),
-                renderCache: renderCache(),
-                renderObserver: _TestRenderObserver(hasFocus: focused),
+                atlasPool: atlasPool(),
+                focused: focused,
                 blinkVisible: blinkVisible,
                 preeditText: preeditText,
                 linkSnapshot: linkSnapshot,
-                onResize: onResize,
+                onGeometryChanged: (geometry) {
+                  terminal.resize(
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                    cellWidthPx:
+                        (geometry.cellWidth * geometry.devicePixelRatio)
+                            .round(),
+                    cellHeightPx:
+                        (geometry.cellHeight * geometry.devicePixelRatio)
+                            .round(),
+                  );
+                  onGeometryChanged?.call(geometry);
+                },
+                onViewportRowChanged: (_) {},
               ),
             ),
           ),
@@ -163,7 +180,7 @@ void main() {
           '\x1b[2mFaint text\x1b[0m\r\n'
           '\x1b[7mInverse text\x1b[0m\r\n'
           '\x1b[42;30m BG color \x1b[0m\r\n'
-          'a => b != c === d',
+          '== === !== != -> =>',
         );
         tester.view.devicePixelRatio = 1.0;
         await tester.pumpWidget(
@@ -178,6 +195,31 @@ void main() {
         await expectLater(
           find.byType(TerminalRenderer),
           matchesGoldenFile('goldens/text_styles.png'),
+        );
+        terminal.dispose();
+      });
+
+      testWidgets('Nerd Font symbol spacing', (tester) async {
+        const cols = 7;
+        const rows = 1;
+        final terminal = Terminal(cols: cols, rows: rows);
+        writeUtf8(terminal, '\x1b[34m\uE5FF\x1b[0m fvm');
+        final nerdTheme = theme.copyWith(
+          fontFamilyFallback: bundledNerdFontFamilyFallback,
+        );
+        tester.view.devicePixelRatio = 1.0;
+        await tester.pumpWidget(
+          wrap(
+            terminal,
+            theme: nerdTheme,
+            metrics: goldenMetrics,
+            maxWidth: cols * goldenMetrics.cellWidth,
+            maxHeight: rows * goldenMetrics.cellHeight,
+          ),
+        );
+        await expectLater(
+          find.byType(TerminalRenderer),
+          matchesGoldenFile('goldens/text_nerd_font_symbol_spacing.png'),
         );
         terminal.dispose();
       });
@@ -977,17 +1019,4 @@ void main() {
       });
     });
   });
-}
-
-class _TestRenderObserver implements TerminalRenderObserver {
-  @override
-  final bool hasFocus;
-
-  const _TestRenderObserver({this.hasFocus = true});
-
-  @override
-  void addListener(VoidCallback listener) {}
-
-  @override
-  void removeListener(VoidCallback listener) {}
 }

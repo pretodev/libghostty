@@ -6,7 +6,7 @@ import 'dart:typed_data';
 
 import 'package:flterm/src/foundation.dart';
 import 'package:flterm/src/rendering.dart';
-import 'package:flterm/src/rendering/terminal_render_cache.dart';
+import 'package:flterm/src/rendering/atlas_pool.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,16 +15,16 @@ import 'package:libghostty/libghostty.dart';
 import 'helpers/font_loader.dart';
 
 void main() {
-  group('Cursor goldens', () {
+  group('RenderStateCursor goldens', () {
     const cjkFallback = ['Noto Sans JP', 'JetBrains Mono'];
     const cols = 15;
     const emojiFallback = ['Noto Emoji', 'JetBrains Mono'];
     const rows = 3;
 
-    TerminalRenderCache renderCache() {
-      final cache = TerminalRenderCache();
-      addTearDown(cache.dispose);
-      return cache;
+    AtlasPool atlasPool() {
+      final pool = AtlasPool();
+      addTearDown(pool.dispose);
+      return pool;
     }
 
     TerminalTheme cursorTheme(
@@ -57,8 +57,11 @@ void main() {
       CellMetrics metrics,
       TerminalTheme theme,
     ) async {
+      applyTerminalTheme(terminal, theme);
       final width = cols * metrics.cellWidth;
       final height = rows * metrics.cellHeight;
+      final frameSource = FrameSource(terminal);
+      addTearDown(frameSource.dispose);
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = Size(width, height);
       addTearDown(() {
@@ -76,10 +79,12 @@ void main() {
               child: TerminalRenderer(
                 theme: theme,
                 metrics: metrics,
-                terminal: terminal,
+                frameSource: frameSource,
                 offset: ViewportOffset.zero(),
-                renderCache: renderCache(),
-                renderObserver: _TestRenderObserver(),
+                atlasPool: atlasPool(),
+                focused: true,
+                onGeometryChanged: (_) {},
+                onViewportRowChanged: (_) {},
               ),
             ),
           ),
@@ -341,15 +346,4 @@ void main() {
       });
     });
   });
-}
-
-class _TestRenderObserver implements TerminalRenderObserver {
-  @override
-  bool get hasFocus => true;
-
-  @override
-  void addListener(VoidCallback listener) {}
-
-  @override
-  void removeListener(VoidCallback listener) {}
 }

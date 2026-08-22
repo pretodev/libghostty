@@ -1,7 +1,7 @@
 import 'package:flterm/src/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:libghostty/libghostty.dart';
+import 'package:material_ui/material_ui.dart';
 
 void main() {
   group('CursorTheme', () {
@@ -288,6 +288,12 @@ void main() {
       expect(theme.minimumContrast, 1.0);
       expect(theme.fontFamilyFallback, isNotEmpty);
       expect(theme.selection, const SelectionTheme());
+    });
+
+    test('prioritizes the proportional Nerd Symbols fallback', () {
+      final theme = TerminalTheme.dark();
+
+      expect(theme.fontFamilyFallback.first, 'Symbols Nerd Font');
     });
 
     test('defaults: fully opaque background, per-cell opacity off', () {

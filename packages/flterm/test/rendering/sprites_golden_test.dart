@@ -6,8 +6,8 @@ import 'dart:typed_data';
 
 import 'package:flterm/src/foundation.dart';
 import 'package:flterm/src/rendering.dart';
+import 'package:flterm/src/rendering/atlas_pool.dart';
 import 'package:flterm/src/rendering/sprite/sprite_face.dart';
-import 'package:flterm/src/rendering/terminal_render_cache.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -67,10 +67,10 @@ void main() {
       ...inclusiveRange(0x1CE90, 0x1CEAF),
     ];
 
-    TerminalRenderCache renderCache() {
-      final cache = TerminalRenderCache();
-      addTearDown(cache.dispose);
-      return cache;
+    AtlasPool atlasPool() {
+      final pool = AtlasPool();
+      addTearDown(pool.dispose);
+      return pool;
     }
 
     void writeUtf8(Terminal terminal, String text) {
@@ -84,6 +84,8 @@ void main() {
       double? maxWidth,
       double? maxHeight,
     }) {
+      final frameSource = FrameSource(terminal);
+      addTearDown(frameSource.dispose);
       final width = maxWidth ?? cols * metrics.cellWidth;
       final height = maxHeight ?? rows * metrics.cellHeight;
       return Directionality(
@@ -93,12 +95,14 @@ void main() {
           child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: width, maxHeight: height),
             child: TerminalRenderer(
-              terminal: terminal,
+              frameSource: frameSource,
               theme: theme,
               metrics: metrics,
               offset: ViewportOffset.zero(),
-              renderCache: renderCache(),
-              renderObserver: const _TestRenderObserver(),
+              atlasPool: atlasPool(),
+              focused: true,
+              onGeometryChanged: (_) {},
+              onViewportRowChanged: (_) {},
             ),
           ),
         ),
@@ -117,6 +121,7 @@ void main() {
       final terminalCols = cols * cellsPerSlot;
       final terminal = Terminal(cols: terminalCols, rows: rows);
       addTearDown(terminal.dispose);
+      applyTerminalTheme(terminal, theme);
       writeUtf8(terminal, codepointGridText(codepoints, cols, cellsPerSlot));
       tester.view.devicePixelRatio = 1.0;
       await tester.pumpWidget(
@@ -266,6 +271,7 @@ void main() {
         const rows = 9;
         final terminal = Terminal(cols: cols, rows: rows);
         addTearDown(terminal.dispose);
+        applyTerminalTheme(terminal, theme);
         writeUtf8(
           terminal,
           'Box: ┌────────┐ ╞═╪═╡\r\n'
@@ -305,6 +311,7 @@ void main() {
       testWidgets('block cursor on sprite glyph', (tester) async {
         final terminal = Terminal(cols: cols, rows: rows);
         addTearDown(terminal.dispose);
+        applyTerminalTheme(terminal, theme);
         writeUtf8(terminal, 'AB─CD\x1b[1;3H');
         tester.view.devicePixelRatio = 1.0;
         await tester.pumpWidget(
@@ -323,17 +330,4 @@ void main() {
       });
     });
   });
-}
-
-class _TestRenderObserver implements TerminalRenderObserver {
-  const _TestRenderObserver();
-
-  @override
-  bool get hasFocus => true;
-
-  @override
-  void addListener(VoidCallback listener) {}
-
-  @override
-  void removeListener(VoidCallback listener) {}
 }

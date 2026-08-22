@@ -1,7 +1,8 @@
 import 'dart:typed_data';
 import 'dart:ui';
 
-import 'package:libghostty/libghostty.dart' show Cursor, TerminalColors;
+import 'package:libghostty/libghostty.dart'
+    show RenderStateCursor, TerminalColors;
 
 import '../foundation.dart' show CellMetrics, TerminalTheme;
 import 'atlas/atlas.dart';
@@ -14,7 +15,7 @@ import 'atlas/atlas.dart';
 ///
 /// Contains grid dimensions, device pixel ratio, resolved terminal
 /// colors, cursor state, IME preedit state, and faint text opacity.
-class TerminalPaintState {
+class PaintState {
   TerminalTheme theme;
   CellMetrics metrics;
 
@@ -35,7 +36,7 @@ class TerminalPaintState {
 
   var viewportOffset = 0;
 
-  var cursor = const Cursor();
+  var cursor = const RenderStateCursor();
   var cursorWide = false;
   var cursorFocused = true;
   var cursorColorArgb = 0xFFFFFFFF;
@@ -48,7 +49,7 @@ class TerminalPaintState {
   /// over the active composing range.
   var preeditActive = false;
 
-  TerminalPaintState(this.theme, this.metrics)
+  PaintState(this.theme, this.metrics)
     : faintAlpha = (theme.faintOpacity * 255).ceil() {
     terminalForegroundArgb = theme.foreground.toARGB32();
     terminalBackgroundArgb = theme.background.toARGB32();
