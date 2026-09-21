@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart' show immutable, mapEquals;
 import 'package:libghostty/libghostty.dart';
 
 /// When to auto-scroll the viewport to the bottom.
@@ -87,6 +87,14 @@ class TerminalConfig {
   /// existing terminal; [TerminalView] supplies its measured live dimensions.
   final int rows;
 
+  /// Maximum number of unfinished VT or UTF-8 bytes retained for snapshots.
+  ///
+  /// Defaults to zero, which disables continuation tracking. Valid values range
+  /// from zero through `0xffffffff` for consistent native and WebAssembly
+  /// behavior. Set a positive limit before writing input that may be unfinished
+  /// when [TerminalController.snapshot] is called.
+  final int continuationMaxBytes;
+
   /// Maximum scrollback buffer size in bytes.
   ///
   /// Defaults to 10,000 bytes. Set to null for no limit, or 0 to disable
@@ -118,6 +126,12 @@ class TerminalConfig {
   /// Defaults to 65 MiB. Set to 0 to reject APC payload data.
   final int apcBufferLimit;
 
+  /// Maximum decoded bytes accepted in one Kitty clipboard write.
+  ///
+  /// Defaults to libghostty's 64 MiB limit. Set to null to restore that
+  /// default.
+  final int? clipboardWriteMaxBytes;
+
   /// Whether Glyph Protocol APC handling is enabled.
   ///
   /// Defaults to false. Enable to parse Glyph Protocol image payloads in
@@ -141,6 +155,9 @@ class TerminalConfig {
   /// Programs can change modes at runtime via escape sequences. Use
   /// [TerminalController.modeGet] and [TerminalController.modeSet] to
   /// query or override the live state.
+  ///
+  /// Treat the supplied map as immutable. To change configured modes, supply
+  /// a new map in a replacement configuration.
   final Map<TerminalMode, bool> modes;
 
   /// When to auto-scroll the viewport to the bottom.
@@ -167,9 +184,11 @@ class TerminalConfig {
   const TerminalConfig({
     this.cols = 80,
     this.rows = 24,
+    this.continuationMaxBytes = 0,
     this.cursorBlink,
     this.glyphProtocol = false,
     this.apcBufferLimit = defaultApcBufferLimit,
+    this.clipboardWriteMaxBytes,
     this.enquiryResponse = '',
     this.modes = defaultModes,
     this.cursorStyle = .block,
@@ -182,6 +201,14 @@ class TerminalConfig {
   }) : assert(cols > 0, 'cols must be positive'),
        assert(rows > 0, 'rows must be positive'),
        assert(
+         continuationMaxBytes >= 0,
+         'continuationMaxBytes must be non-negative',
+       ),
+       assert(
+         continuationMaxBytes <= 0xffffffff,
+         'continuationMaxBytes must fit an unsigned 32-bit integer',
+       ),
+       assert(
          scrollbackMaxBytes == null || scrollbackMaxBytes >= 0,
          'scrollbackMaxBytes must be non-negative',
        ),
@@ -193,16 +220,22 @@ class TerminalConfig {
          kittyImageStorageLimit >= 0,
          'kittyImageStorageLimit must be non-negative',
        ),
-       assert(apcBufferLimit >= 0, 'apcBufferLimit must be non-negative');
+       assert(apcBufferLimit >= 0, 'apcBufferLimit must be non-negative'),
+       assert(
+         clipboardWriteMaxBytes == null || clipboardWriteMaxBytes >= 0,
+         'clipboardWriteMaxBytes must be non-negative',
+       );
 
   @override
   int get hashCode => Object.hash(
     cols,
     rows,
+    continuationMaxBytes,
     scrollbackMaxBytes,
     scrollbackMaxLines,
     kittyImageStorageLimit,
     apcBufferLimit,
+    clipboardWriteMaxBytes,
     glyphProtocol,
     cursorStyle,
     cursorBlink,
@@ -219,14 +252,16 @@ class TerminalConfig {
       other is TerminalConfig &&
           cols == other.cols &&
           rows == other.rows &&
+          continuationMaxBytes == other.continuationMaxBytes &&
           scrollbackMaxBytes == other.scrollbackMaxBytes &&
           scrollbackMaxLines == other.scrollbackMaxLines &&
           kittyImageStorageLimit == other.kittyImageStorageLimit &&
           apcBufferLimit == other.apcBufferLimit &&
+          clipboardWriteMaxBytes == other.clipboardWriteMaxBytes &&
           glyphProtocol == other.glyphProtocol &&
           cursorStyle == other.cursorStyle &&
           cursorBlink == other.cursorBlink &&
-          _modesEqual(modes, other.modes) &&
+          mapEquals(modes, other.modes) &&
           scrollToBottom == other.scrollToBottom &&
           selectionClearOnTyping == other.selectionClearOnTyping &&
           enquiryResponse == other.enquiryResponse &&
@@ -236,10 +271,12 @@ class TerminalConfig {
   TerminalConfig copyWith({
     int? cols,
     int? rows,
+    int? continuationMaxBytes,
     int? scrollbackMaxBytes,
     int? scrollbackMaxLines,
     int? kittyImageStorageLimit,
     int? apcBufferLimit,
+    int? clipboardWriteMaxBytes,
     bool? glyphProtocol,
     CursorShape? cursorStyle,
     bool? cursorBlink,
@@ -252,11 +289,14 @@ class TerminalConfig {
     return TerminalConfig(
       cols: cols ?? this.cols,
       rows: rows ?? this.rows,
+      continuationMaxBytes: continuationMaxBytes ?? this.continuationMaxBytes,
       scrollbackMaxBytes: scrollbackMaxBytes ?? this.scrollbackMaxBytes,
       scrollbackMaxLines: scrollbackMaxLines ?? this.scrollbackMaxLines,
       kittyImageStorageLimit:
           kittyImageStorageLimit ?? this.kittyImageStorageLimit,
       apcBufferLimit: apcBufferLimit ?? this.apcBufferLimit,
+      clipboardWriteMaxBytes:
+          clipboardWriteMaxBytes ?? this.clipboardWriteMaxBytes,
       glyphProtocol: glyphProtocol ?? this.glyphProtocol,
       cursorStyle: cursorStyle ?? this.cursorStyle,
       cursorBlink: cursorBlink ?? this.cursorBlink,
@@ -273,19 +313,8 @@ class TerminalConfig {
   String toString() =>
       'TerminalConfig('
       'cols: $cols, rows: $rows, '
+      'continuationMaxBytes: $continuationMaxBytes, '
       'scrollbackMaxBytes: $scrollbackMaxBytes, '
       'scrollbackMaxLines: $scrollbackMaxLines, '
       'modes: ${modes.length} entries)';
-
-  static bool _modesEqual(
-    Map<TerminalMode, bool> a,
-    Map<TerminalMode, bool> b,
-  ) {
-    if (identical(a, b)) return true;
-    if (a.length != b.length) return false;
-    for (final entry in a.entries) {
-      if (b[entry.key] != entry.value) return false;
-    }
-    return true;
-  }
 }

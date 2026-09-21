@@ -6,8 +6,13 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flterm/src/foundation/cell_metrics.dart';
+import 'package:flterm/src/foundation/cell_range.dart';
 import 'package:flterm/src/foundation/dynamic_color.dart';
 import 'package:flterm/src/foundation/terminal_theme.dart';
+import 'package:flterm/src/links/link_match.dart';
+import 'package:flterm/src/links/link_settings.dart'
+    show ActivatedLink, LinkType;
+import 'package:flterm/src/links/link_snapshot.dart';
 import 'package:flterm/src/rendering/atlas/atlas.dart';
 import 'package:flterm/src/rendering/atlas/sprite_buffer.dart';
 import 'package:flterm/src/rendering/frame_builder.dart';
@@ -37,6 +42,11 @@ void main() {
     List<double> xPositions(AtlasSprites sprites) {
       final transforms = sprites.sealedTransforms;
       return List.generate(sprites.count, (index) => transforms[index * 4 + 2]);
+    }
+
+    List<double> yPositions(AtlasSprites sprites) {
+      final transforms = sprites.sealedTransforms;
+      return List.generate(sprites.count, (index) => transforms[index * 4 + 3]);
     }
 
     String entryRectKey(AtlasEntry entry) {
@@ -146,14 +156,106 @@ void main() {
       expect(atlas.emojiImage, isNotNull);
     });
 
-    test('sync emits operator ligatures without adding text atlas entries', () {
-      final initialCacheSize = atlas.cacheSize;
-      writeUtf8(terminal, '=> !=');
+    test('sync lets a private-use symbol occupy a following blank cell', () {
+      writeUtf8(terminal, '\u{E5FF} A');
 
       builder.sync(terminal, terminalDirty: true);
 
-      expect(sprites.shaped.count, 2);
+      expect(
+        (sprites.regular.count, sprites.wide.count, sprites.emoji.count),
+        (1, 1, 0),
+      );
+    });
+
+    test('sync constrains a private-use symbol before text to one cell', () {
+      writeUtf8(terminal, '\u{E5FF}A');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(sprites.regular.count, 2);
+      expect(sprites.wide.count, 0);
+    });
+
+    test('sync constrains consecutive private-use symbols to one cell', () {
+      writeUtf8(terminal, '\u{E5FF}\u{E5FF} ');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(sprites.regular.count, 2);
+      expect(sprites.wide.count, 0);
+    });
+
+    test('sync lets a symbol borrow after an invisible symbol', () {
+      writeUtf8(terminal, '\x1b[8m\u{E5FF}\x1b[28m\u{E5FF} ');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(sprites.wide.count, 1);
+    });
+
+    test('sync lets a symbol borrow after a preedit replacement', () {
+      writeUtf8(terminal, '\u{E5FF}\u{E5FF} \x1b[1;1H');
+
+      builder.sync(terminal, terminalDirty: true, preeditText: 'a');
+
+      expect(sprites.wide.count, 1);
+    });
+
+    test('sync constrains a final-column private-use symbol to one cell', () {
+      final frame = createFrame(cols: 1, rows: 1);
+      writeUtf8(frame.terminal, '\u{E5FF}');
+
+      frame.builder.sync(frame.terminal, terminalDirty: true);
+
+      expect(frame.sprites.regular.count, 1);
+      expect(frame.sprites.wide.count, 0);
+    });
+
+    test(
+      'sync does not expand a private-use symbol over nonbreaking space',
+      () {
+        writeUtf8(terminal, '\u{E5FF}\u00A0');
+
+        builder.sync(terminal, terminalDirty: true);
+
+        expect(sprites.wide.count, 0);
+      },
+    );
+
+    test('sync rebuilds external and terminal dirty rows together', () {
+      writeUtf8(terminal, 'A\r\nB');
+      builder.sync(terminal, terminalDirty: true);
+      builder.markRowsDirty(1, 2);
+      writeUtf8(terminal, '\x1b[1;1HC');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(sprites.regular.count, 2);
+    });
+
+    test('sync emits operator ligatures without adding text atlas entries', () {
+      final initialCacheSize = atlas.cacheSize;
+      writeUtf8(terminal, '=> != ===');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(sprites.shaped.count, 3);
+      expect(
+        sprites.shaped.rows.where((row) => row.isNotEmpty).single,
+        hasLength(3),
+      );
       expect(atlas.cacheSize, initialCacheSize);
+    });
+
+    test('sync separates operator runs at a foreground color boundary', () {
+      writeUtf8(terminal, '=>\x1b[31m!=');
+
+      builder.sync(terminal, terminalDirty: true);
+
+      expect(
+        sprites.shaped.rows.where((row) => row.isNotEmpty).single,
+        hasLength(2),
+      );
     });
 
     test('sync chunks long operator runs without adding atlas entries', () {
@@ -264,6 +366,52 @@ void main() {
       expect(sprites.underline.sealedColors.single, 0xFF010203.toSigned(32));
     });
 
+    test('sync preserves link underline across a highlight boundary', () {
+      final singleUnderline = atlas.addDecoration(.single);
+      state.updateTheme(
+        TerminalTheme.dark().copyWith(
+          hyperlink: const HyperlinkTheme(
+            idle: HyperlinkStyle(underline: .single),
+          ),
+        ),
+      );
+      writeUtf8(terminal, 'ab');
+      terminal.selection = Selection.fromRefs(
+        start: GridRef.at(terminal, const Position(row: 0, col: 1)),
+        end: GridRef.at(terminal, const Position(row: 0, col: 1)),
+      );
+      const link = LinkMatch(
+        priority: 0,
+        sourceOrder: 0,
+        hoverOnly: false,
+        link: ActivatedLink(
+          type: LinkType.custom,
+          id: 'test',
+          text: 'ab',
+          range: CellRange(
+            start: Position(row: 0, col: 0),
+            end: Position(row: 0, col: 1),
+          ),
+        ),
+      );
+
+      builder.sync(
+        terminal,
+        terminalDirty: true,
+        linkSnapshot: const LinkSnapshot([link]),
+      );
+
+      expect(sprites.underline.count, 2);
+      expect(
+        spriteRectKey(sprites.underline, 0),
+        entryRectKey(singleUnderline),
+      );
+      expect(
+        spriteRectKey(sprites.underline, 1),
+        entryRectKey(singleUnderline),
+      );
+    });
+
     test(
       'sync emits selection background without terminal access in paint',
       () {
@@ -279,12 +427,160 @@ void main() {
       },
     );
 
+    test('sync emits search match colors', () {
+      final search = Search(terminal);
+      addTearDown(search.dispose);
+      state.updateTheme(
+        TerminalTheme.dark().copyWith(
+          search: const SearchTheme(
+            match: SelectionTheme(
+              background: DynamicColor.fixed(Color(0xFF112233)),
+              foreground: DynamicColor.fixed(Color(0xFF445566)),
+            ),
+          ),
+        ),
+      );
+      writeUtf8(terminal, 'hello');
+      search.setNeedle('ell');
+      search.run();
+
+      builder.sync(
+        terminal,
+        terminalDirty: true,
+        searchDirty: true,
+        searchMatches: search.viewportMatches,
+      );
+
+      expect(sprites.background.count, greaterThan(0));
+      expect(sprites.regular.sealedColors, contains(0xFF445566.toSigned(32)));
+    });
+
+    test('sync highlights the visible part of a multiline search match', () {
+      final frame = createFrame(cols: 5, rows: 2);
+      final search = Search(frame.terminal);
+      addTearDown(search.dispose);
+      frame.state.updateTheme(
+        TerminalTheme.dark().copyWith(
+          search: const SearchTheme(
+            match: SelectionTheme(
+              foreground: DynamicColor.fixed(Color(0xFF445566)),
+            ),
+          ),
+        ),
+      );
+      writeUtf8(frame.terminal, 'abcdef\r\n11111\r\n22222\r\n33333');
+      search.setNeedle('abcdef');
+      search.run();
+      frame.terminal.scrollToRow(1);
+      search.run();
+
+      frame.builder.sync(
+        frame.terminal,
+        terminalDirty: true,
+        searchDirty: true,
+        searchMatches: search.viewportMatches,
+      );
+
+      expect(
+        frame.sprites.regular.sealedColors,
+        contains(0xFF445566.toSigned(32)),
+      );
+    });
+
+    test('sync applies highlight precedence', () {
+      final search = Search(terminal);
+      addTearDown(search.dispose);
+      state.updateTheme(
+        TerminalTheme.dark().copyWith(
+          selection: const SelectionTheme(
+            foreground: DynamicColor.fixed(Color(0xFF0000FF)),
+          ),
+          search: const SearchTheme(
+            match: SelectionTheme(
+              foreground: DynamicColor.fixed(Color(0xFFFF0000)),
+            ),
+            selectedMatch: SelectionTheme(
+              foreground: DynamicColor.fixed(Color(0xFF00FF00)),
+            ),
+          ),
+        ),
+      );
+      writeUtf8(terminal, 'hello');
+      terminal.selection = Selection.fromRefs(
+        start: GridRef.at(terminal, const Position(row: 0, col: 1)),
+        end: GridRef.at(terminal, const Position(row: 0, col: 3)),
+      );
+      search.setNeedle('ell');
+      search.run();
+
+      builder.sync(
+        terminal,
+        terminalDirty: true,
+        searchDirty: true,
+        searchMatches: search.viewportMatches,
+      );
+      final ordinaryColors = sprites.regular.sealedColors.toList();
+      search.selectNext();
+      builder.sync(
+        terminal,
+        terminalDirty: true,
+        searchDirty: true,
+        searchMatches: search.viewportMatches,
+        selectedSearchMatch: search.selectedMatch,
+      );
+
+      expect(ordinaryColors, contains(0xFF0000FF.toSigned(32)));
+      expect(ordinaryColors, isNot(contains(0xFFFF0000.toSigned(32))));
+      expect(sprites.regular.sealedColors, contains(0xFF00FF00.toSigned(32)));
+    });
+
+    test('sync restores rows when search matches are cleared', () {
+      state.updateTheme(
+        TerminalTheme.dark().copyWith(
+          search: const SearchTheme(
+            match: SelectionTheme(
+              foreground: DynamicColor.fixed(Color(0xFFFF0000)),
+            ),
+          ),
+        ),
+      );
+      writeUtf8(terminal, 'AB\r\nCD');
+      builder.sync(terminal, terminalDirty: true);
+      final normalColors = sprites.regular.sealedColors.toList();
+      final match = Selection.fromRefs(
+        start: GridRef.at(terminal, const Position(row: 0, col: 0)),
+        end: GridRef.at(terminal, const Position(row: 0, col: 1)),
+      );
+
+      builder.sync(
+        terminal,
+        terminalDirty: false,
+        searchDirty: true,
+        searchMatches: [match],
+      );
+      builder.sync(terminal, terminalDirty: false, searchDirty: true);
+
+      expect(sprites.regular.sealedColors, normalColors);
+    });
+
+    test('sync resets hidden style state at a default row', () {
+      final frame = createFrame(cols: 1, rows: 2);
+      writeUtf8(frame.terminal, '\x1b[8;31mA\x1b[0m\r\nB');
+
+      frame.builder.sync(frame.terminal, terminalDirty: true);
+
+      expect(frame.sprites.regular.sealedColors, [
+        frame.state.terminalForegroundArgb.toSigned(32),
+      ]);
+      expect(yPositions(frame.sprites.regular), [16.0]);
+    });
+
     test('sync resolves block cursor glyph from cached frame state', () {
       writeUtf8(terminal, 'A\x1b[1;1H');
       builder.sync(terminal, terminalDirty: true);
 
       expect(state.cursor.visible, isTrue);
-      expect(state.cursor.position.col, 0);
+      expect(state.cursor.viewportX, 0);
       expect(state.cursorAtlasEntry, isNotNull);
     });
 
@@ -316,7 +612,7 @@ void main() {
       builder.sync(terminal, terminalDirty: true);
 
       expect(state.cursor.visible, isTrue);
-      expect(state.cursor.shape, CursorShape.underline);
+      expect(state.cursor.visualStyle, CursorShape.underline);
       expect(state.cursorAtlasEntry, isNull);
     });
 
@@ -481,6 +777,68 @@ void main() {
 
       expect(state.preeditActive, isFalse);
       expect(xPositions(sprites.regular), [0.0, 8.0, 16.0, 24.0, 32.0, 40.0]);
+    });
+
+    test('sync moves unchanged preedit text with the cursor', () {
+      writeUtf8(terminal, 'A\r\nB\x1b[1;1H');
+      builder.sync(terminal, terminalDirty: true, preeditText: '日');
+      writeUtf8(terminal, '\x1b[2;1H');
+
+      builder.sync(terminal, terminalDirty: true, preeditText: '日');
+
+      expect(xPositions(sprites.regular), [0.0]);
+      expect(yPositions(sprites.regular), [0.0]);
+      expect(xPositions(sprites.wide), [0.0]);
+      expect(yPositions(sprites.wide), [16.0]);
+    });
+
+    group('incremental invalidation', () {
+      test('blink changes retain rows without blinking cells', () {
+        writeUtf8(terminal, '\x1b[5m=>\x1b[0m\r\n!=');
+        builder.sync(terminal, terminalDirty: true);
+        final retainedRun = sprites.shaped.rows[1].single;
+        state.blinkVisible = false;
+        builder.markBlinkRowsDirty();
+
+        builder.sync(terminal, terminalDirty: false);
+
+        expect(sprites.shaped.rows[1].single, same(retainedRun));
+      });
+
+      test('blink changes hide and show blinking rows', () {
+        writeUtf8(terminal, '\x1b[5mA\x1b[0m\r\nB');
+        builder.sync(terminal, terminalDirty: true);
+
+        state.blinkVisible = false;
+        builder.markBlinkRowsDirty();
+        builder.sync(terminal, terminalDirty: false);
+        expect(sprites.regular.count, 1);
+
+        state.blinkVisible = true;
+        builder.markBlinkRowsDirty();
+        builder.sync(terminal, terminalDirty: false);
+
+        expect(sprites.regular.count, 2);
+      });
+
+      test('search changes retain rows outside matches', () {
+        writeUtf8(terminal, '=>\r\n!=');
+        builder.sync(terminal, terminalDirty: true);
+        final retainedRun = sprites.shaped.rows[1].single;
+        final match = Selection.fromRefs(
+          start: GridRef.at(terminal, const Position(row: 0, col: 0)),
+          end: GridRef.at(terminal, const Position(row: 0, col: 1)),
+        );
+
+        builder.sync(
+          terminal,
+          terminalDirty: false,
+          searchDirty: true,
+          searchMatches: [match],
+        );
+
+        expect(sprites.shaped.rows[1].single, same(retainedRun));
+      });
     });
 
     test('sync ignores zero-width preedit text', () {

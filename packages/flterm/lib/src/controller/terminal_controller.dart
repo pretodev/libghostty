@@ -1,18 +1,47 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart' hide Key;
-import 'package:libghostty/libghostty.dart' hide Listenable;
+import 'package:flutter/services.dart' hide KeyEvent;
+import 'package:flutter/widgets.dart' hide Key;
+import 'package:libghostty/libghostty.dart' hide KeyEvent, Listenable;
 
 import '../foundation.dart';
 import '../input/input_encoder.dart';
 import '../input/input_message.dart';
-import '../interaction/selection_session.dart';
+import '../input/input_modifiers.dart';
+import '../input/selection_session.dart';
+import '../input/text_input_session.dart';
+import '../links/link_interaction.dart';
+import '../links/link_settings.dart';
+import '../view/compression_scheduler.dart';
 import 'kitty_png_decoder.dart';
+import 'terminal_search_controller.dart';
 
-part 'terminal_controller_impl.dart';
+part '../view/view_attachment.dart';
+part 'terminal_input.dart';
+part 'terminal_session.dart';
 
 /// Reports the committed terminal grid dimensions to the backend.
 typedef OnResize = void Function(int cols, int rows);
+
+/// Describes the snapshot restoration lifecycle of a [TerminalController].
+enum RestorationState {
+  /// The controller was not created from a snapshot.
+  none,
+
+  /// The terminal is ready while older scrollback is still being restored.
+  restoring,
+
+  /// The complete snapshot was restored and validated.
+  complete,
+
+  /// Progressive restoration stopped before the snapshot was complete.
+  ///
+  /// The terminal remains usable. [TerminalController.restored] completes with
+  /// the restoration error.
+  failed,
+}
 
 /// Manages terminal state and bridges it with [TerminalView].
 ///
@@ -33,7 +62,8 @@ typedef OnResize = void Function(int cols, int rows);
 /// the current input before the exception is rethrown.
 ///
 /// ```dart
-/// final controller = TerminalController()
+/// final controller = TerminalController();
+/// controller
 ///   ..onOutput = (bytes) => pty.write(bytes)
 ///   ..onBell = () => playSound()
 ///   ..onTitleChanged = () => updateTitle(controller.title);
@@ -43,15 +73,53 @@ typedef OnResize = void Function(int cols, int rows);
 /// pty.onData = (bytes) => controller.write(bytes);
 /// controller.sendText('ls -la\n');
 /// ```
-abstract class TerminalController extends ChangeNotifier {
+sealed class TerminalController implements Listenable {
   /// Creates a controller with the given [config].
   ///
   /// The terminal is created immediately with the initial dimensions, modes,
   /// resource limits, and other behavior from [config].
-  factory TerminalController({TerminalConfig config}) = TerminalControllerImpl;
+  factory TerminalController({TerminalConfig config}) = TerminalSession;
 
-  @internal
-  TerminalController.base();
+  /// Creates a controller from libghostty snapshot [bytes].
+  ///
+  /// Copies [bytes]. When [progressive] is true, the default, the terminal is
+  /// ready to render before this returns and older scrollback loads
+  /// automatically. When false, the complete snapshot is restored and
+  /// validated before this returns.
+  ///
+  /// [maxContinuationBytes] limits the unfinished terminal input accepted from
+  /// the snapshot. Null uses the libghostty default; zero rejects snapshots
+  /// with unfinished input. [retainContinuation] defaults to false. Set it to
+  /// true to keep tracking unfinished input for subsequent [snapshot] calls.
+  ///
+  /// [deferResize] defaults to true and preserves the snapshot grid size until
+  /// restoration finishes. When false, a view-driven resize may cause
+  /// incompatible scrollback pages to be skipped. [preserveSnapshotColors]
+  /// defaults to true and preserves terminal colors on initial view attachment;
+  /// later theme changes apply normally.
+  ///
+  /// Dimensions, modes, cursor state, and scrollback limits come from the
+  /// snapshot. Replacing [config] afterward applies the new configuration
+  /// normally. Callbacks and backend connections must be wired by the caller.
+  /// Failures before the terminal is renderable throw from this constructor;
+  /// later failures complete [restored] with the restoration error. Dispose the
+  /// controller to cancel progressive restoration and release its resources.
+  ///
+  /// ```dart
+  /// final controller = TerminalController.fromSnapshot(bytes)
+  ///   ..onOutput = backend.write;
+  /// final view = TerminalView(controller: controller);
+  /// ```
+  factory TerminalController.fromSnapshot(
+    Uint8List bytes, {
+    bool progressive,
+    int? maxContinuationBytes,
+    bool retainContinuation,
+    bool deferResize,
+    bool preserveSnapshotColors,
+  }) = TerminalSession.fromSnapshot;
+
+  TerminalController._();
 
   /// The active [TerminalScreen] buffer, either primary or alternate.
   ///
@@ -65,6 +133,11 @@ abstract class TerminalController extends ChangeNotifier {
   /// The value contains the defaults applied by the controller. A program can
   /// change live terminal modes with [modeSet], so mode state may differ from
   /// [config].
+  ///
+  /// Restored controllers inherit snapshot dimensions and scrollback and
+  /// continuation limits. Their mode override map starts empty. Cursor defaults
+  /// describe host preferences and may differ from the restored terminal until
+  /// [config] is replaced.
   TerminalConfig get config;
 
   /// Replaces the configuration.
@@ -99,14 +172,22 @@ abstract class TerminalController extends ChangeNotifier {
   /// to null to ignore BEL events.
   set onBell(VoidCallback? value);
 
+  /// Handles a clipboard read requested by terminal content.
+  ///
+  /// The callback receives the requested MIME types and must return a
+  /// [ClipboardReadReply]. Requests are ignored when this is null. Apply an
+  /// explicit trust and platform policy because requests originate in
+  /// untrusted terminal content.
+  set onClipboardRead(ClipboardReadCallback? callback);
+
   /// Handles a clipboard write requested by terminal content.
   ///
   /// Requests are ignored when this is null. OSC 52 and iTerm2 Copy writes are
   /// normalized into the same binary-safe request. Every content entry is a
   /// representation of one logical value and must be committed atomically; no
   /// entries means clear the destination, while an entry containing no bytes
-  /// means write an empty representation. Clipboard read requests are never
-  /// forwarded.
+  /// means write an empty representation. The callback result is used for
+  /// protocols that support write acknowledgements.
   ///
   /// The callback fires synchronously during [write]. Its result describes the
   /// attempted write, although OSC 52 and iTerm2 Copy do not acknowledge it to
@@ -187,6 +268,22 @@ abstract class TerminalController extends ChangeNotifier {
   /// value is not parsed or normalized: it may be a `file://` URI or a path.
   String get pwd;
 
+  /// The current snapshot restoration state.
+  ///
+  /// Ordinary controllers report [RestorationState.none]. Synchronous
+  /// restoration reports [RestorationState.complete] before construction
+  /// returns. Changes during progressive restoration notify this controller's
+  /// listeners.
+  RestorationState get restoration;
+
+  /// A future that completes when initial snapshot restoration finishes.
+  ///
+  /// The future is already complete for ordinary controllers and synchronous
+  /// restoration. Progressive restoration errors complete it with the original
+  /// error. Disposing the controller during restoration completes it with a
+  /// [StateError]. Read [restoration] for the current lifecycle state.
+  Future<void> get restored;
+
   /// The number of scrollback rows in the active screen.
   int get scrollbackRows;
 
@@ -196,6 +293,15 @@ abstract class TerminalController extends ChangeNotifier {
   /// [TerminalScrollController] supplied to [TerminalView] when a Flutter UI
   /// must observe or control viewport movement.
   Scrollbar get scrollbar;
+
+  /// Search state and navigation for this terminal session.
+  ///
+  /// The controller owns this object and disposes it with the terminal. It is
+  /// also a [Listenable] for search progress, results, selection, policy, and
+  /// viewport changes. Use [TerminalSearchController.search] to start a search;
+  /// flterm performs the incremental libghostty work and renders visible
+  /// matches automatically.
+  TerminalSearchController get search;
 
   /// The title set by the running program through OSC 0 or OSC 2.
   ///
@@ -255,6 +361,20 @@ abstract class TerminalController extends ChangeNotifier {
     bool trim = false,
     FormatterExtra extra = const FormatterExtra(),
   });
+
+  /// Releases the terminal session and every resource it owns.
+  ///
+  /// Dispose formatters and remove the attached [TerminalView] first. Repeated
+  /// calls are safe; terminal operations throw [StateError] afterward.
+  ///
+  /// ```dart
+  /// final controller = TerminalController();
+  /// final formatter = controller.createFormatter(format: .plain);
+  /// final text = formatter.format();
+  /// formatter.dispose();
+  /// controller.dispose();
+  /// ```
+  void dispose();
 
   /// Returns the live value of an ANSI or DEC private terminal [mode].
   ///
@@ -351,6 +471,23 @@ abstract class TerminalController extends ChangeNotifier {
   /// terminal keyboard modes, and [paste] for clipboard content. Empty text is
   /// ignored; otherwise virtual modifiers are cleared after output is sent.
   void sendText(String text);
+
+  /// Encodes the current terminal state as libghostty snapshot bytes.
+  ///
+  /// Returns a newly allocated list that remains valid independently of this
+  /// controller. During progressive restoration, the snapshot includes only
+  /// scrollback that has already loaded. Unfinished VT or UTF-8 input requires
+  /// continuation tracking to have been enabled through
+  /// [TerminalConfig.continuationMaxBytes] before that input arrived. Throws
+  /// when unfinished input cannot be reconstructed. Call serially with [write]
+  /// and outside terminal callbacks.
+  ///
+  /// ```dart
+  /// final controller = TerminalController();
+  /// final bytes = controller.snapshot();
+  /// await sessionStore.save(bytes);
+  /// ```
+  Uint8List snapshot();
 
   /// Toggles a virtual modifier on or off.
   void toggleMod(Mods mod);

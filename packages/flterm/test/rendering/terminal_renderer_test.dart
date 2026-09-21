@@ -49,11 +49,17 @@ void main() {
     ValueChanged<int>? onViewportRowChanged,
     AtlasPool? atlasPool,
     ViewportOffset? offset,
+    bool resizeDeferred = false,
   }) {
     selection?.applyTo(terminal);
     atlasPool ??= createAtlasPool();
-    final frameSource = FrameSource(terminal);
-    addTearDown(frameSource.dispose);
+    final frameChanges = ChangeNotifier();
+    void onTerminalChanged() => frameChanges.notifyListeners();
+    terminal.addListener(onTerminalChanged);
+    addTearDown(() {
+      terminal.removeListener(onTerminalChanged);
+      frameChanges.dispose();
+    });
     final width = maxWidth ?? defaultCols * metrics.cellWidth;
     final height = maxHeight ?? defaultRows * metrics.cellHeight;
     return Directionality(
@@ -63,7 +69,8 @@ void main() {
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: width, maxHeight: height),
           child: TerminalRenderer(
-            frameSource: frameSource,
+            terminal: terminal,
+            frameChanges: frameChanges,
             theme: theme ?? TerminalTheme.dark(),
             metrics: metrics,
             surfacePadding: surfacePadding,
@@ -72,16 +79,35 @@ void main() {
             devicePixelRatio: devicePixelRatio,
             focused: focused,
             blinkVisible: blinkVisible,
-            onGeometryChanged: (geometry) {
-              terminal.resize(
-                cols: geometry.cols,
-                rows: geometry.rows,
-                cellWidthPx: (geometry.cellWidth * geometry.devicePixelRatio)
-                    .round(),
-                cellHeightPx: (geometry.cellHeight * geometry.devicePixelRatio)
-                    .round(),
+            resizeDeferred: resizeDeferred,
+            onGeometryChanged: (measurement) {
+              final current = terminal.geometry;
+              final accepted = SurfaceGeometry.tryFrom(
+                resizeDeferred
+                    ? SurfaceMeasurement(
+                        cols: current.cols,
+                        rows: current.rows,
+                        cellWidth: measurement.cellWidth,
+                        cellHeight: measurement.cellHeight,
+                        paddingLeft: measurement.paddingLeft,
+                        paddingRight: measurement.paddingRight,
+                        paddingTop: measurement.paddingTop,
+                        paddingBottom: measurement.paddingBottom,
+                        devicePixelRatio: measurement.devicePixelRatio,
+                      )
+                    : measurement,
               );
-              onGeometryChanged?.call(geometry);
+              if (accepted == null) return null;
+              if (!resizeDeferred) {
+                terminal.resize(
+                  cols: accepted.cols,
+                  rows: accepted.rows,
+                  cellWidthPx: accepted.cellWidthPx,
+                  cellHeightPx: accepted.cellHeightPx,
+                );
+              }
+              onGeometryChanged?.call(measurement);
+              return accepted;
             },
             onViewportRowChanged: onViewportRowChanged ?? (_) {},
           ),
@@ -123,6 +149,69 @@ void main() {
         find.byType(TerminalRenderer),
       );
       expect(box.size.height, 80.0);
+    });
+
+    testWidgets('uses the terminal grid while resize is deferred', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        wrap(
+          terminal,
+          maxWidth: 10 * defaultMetrics.cellWidth,
+          maxHeight: 3 * defaultMetrics.cellHeight,
+          resizeDeferred: true,
+        ),
+      );
+
+      final box = tester.renderObject<TerminalRenderBox>(
+        find.byType(TerminalRenderer),
+      );
+
+      expect(box.debugGridSize, (cols: defaultCols, rows: defaultRows));
+    });
+
+    testWidgets('reports measured grid while resize is deferred', (
+      tester,
+    ) async {
+      SurfaceMeasurement? reportedGeometry;
+
+      await tester.pumpWidget(
+        wrap(
+          terminal,
+          maxWidth: 10 * defaultMetrics.cellWidth,
+          maxHeight: 3 * defaultMetrics.cellHeight,
+          resizeDeferred: true,
+          onGeometryChanged: (geometry) => reportedGeometry = geometry,
+        ),
+      );
+
+      expect((reportedGeometry!.cols, reportedGeometry!.rows), (10, 3));
+    });
+
+    testWidgets('commits the measured grid when resize deferral ends', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        wrap(
+          terminal,
+          maxWidth: 10 * defaultMetrics.cellWidth,
+          maxHeight: 3 * defaultMetrics.cellHeight,
+          resizeDeferred: true,
+        ),
+      );
+
+      await tester.pumpWidget(
+        wrap(
+          terminal,
+          maxWidth: 10 * defaultMetrics.cellWidth,
+          maxHeight: 3 * defaultMetrics.cellHeight,
+        ),
+      );
+
+      final box = tester.renderObject<TerminalRenderBox>(
+        find.byType(TerminalRenderer),
+      );
+      expect(box.debugGridSize, (cols: 10, rows: 3));
     });
 
     testWidgets('metrics change triggers layout', (tester) async {
@@ -229,12 +318,15 @@ void main() {
       await tester.pumpWidget(wrap(terminal));
       await tester.pumpWidget(wrap(replacement));
 
-      expect(replacement.geometry, (
-        cols: defaultCols,
-        rows: defaultRows,
-        widthPx: defaultCols * defaultMetrics.cellWidth.toInt(),
-        heightPx: defaultRows * defaultMetrics.cellHeight.toInt(),
-      ));
+      expect(
+        replacement.geometry,
+        const TerminalGeometry(
+          cols: defaultCols,
+          rows: defaultRows,
+          widthPx: defaultCols * 8,
+          heightPx: defaultRows * 16,
+        ),
+      );
     });
 
     testWidgets('theme change triggers layout', (tester) async {

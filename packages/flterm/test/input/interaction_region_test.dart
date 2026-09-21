@@ -3,12 +3,13 @@ library;
 
 import 'dart:convert';
 
-import 'package:flterm/src/controller/terminal_controller.dart';
+import 'package:flterm/src/controller/terminal_controller.dart'
+    show TerminalController, ViewAttachment;
 import 'package:flterm/src/foundation.dart';
 import 'package:flterm/src/input/interaction_region.dart';
+import 'package:flterm/src/input/selection_session.dart' show SelectionEndpoint;
 import 'package:flterm/src/links/link_interaction.dart';
 import 'package:flterm/src/links/link_settings.dart';
-import 'package:flterm/src/view/view_attachment.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter/gestures.dart';
@@ -91,13 +92,14 @@ void main() {
       TerminalController controller, {
       int cols = 80,
       int rows = 24,
+      CellMetrics metrics = defaultMetrics,
     }) {
-      bindingFor(controller).handleResize(
+      bindingFor(controller).commitGeometry(
         SurfaceMeasurement(
           cols: cols,
           rows: rows,
-          cellWidth: defaultMetrics.cellWidth,
-          cellHeight: defaultMetrics.cellHeight,
+          cellWidth: metrics.cellWidth,
+          cellHeight: metrics.cellHeight,
           paddingLeft: 0,
           paddingRight: 0,
           paddingTop: 0,
@@ -114,10 +116,15 @@ void main() {
       TerminalGestureSettings gestureSettings = const TerminalGestureSettings(),
       LinkInteraction? links,
       ValueChanged<ActivatedLink>? onLinkActivate,
-      ScrollController? scrollController,
       ScrollPhysics scrollPhysics = const ClampingScrollPhysics(),
     }) {
       final resolvedAttachment = attachment ?? bindingFor(controller);
+      commitGeometry(
+        controller,
+        cols: controller.config.cols,
+        rows: controller.config.rows,
+        metrics: metrics,
+      );
       final resolvedLinks = links ?? LinkInteraction();
       if (links == null) addTearDown(resolvedLinks.dispose);
       return Directionality(
@@ -125,13 +132,17 @@ void main() {
         child: Align(
           alignment: Alignment.topLeft,
           child: InteractionRegion(
-            attachment: resolvedAttachment,
+            readVirtualMods: resolvedAttachment.readVirtualMods,
+            onMouseInput: resolvedAttachment.onMouseInput,
+            onScrollInput: resolvedAttachment.onScrollInput,
+            selection: resolvedAttachment.selectionInput,
             metrics: metrics,
-            interaction: resolvedAttachment.interaction.value,
+            terminalBackground: TerminalTheme.dark().background,
+            interaction: resolvedAttachment.interaction,
+            onViewportRowChanged: resolvedAttachment.handleViewportRowChanged,
             links: resolvedLinks,
             onLinkActivate: onLinkActivate,
             settings: gestureSettings,
-            scrollController: scrollController,
             scrollPhysics: scrollPhysics,
             child: const SizedBox(width: 640, height: 384),
           ),
@@ -485,11 +496,8 @@ void main() {
             textDirection: .ltr,
             child: Scrollable(
               controller: scrollController,
-              viewportBuilder: (_, _) => buildHandler(
-                controller: target,
-                attachment: attachment,
-                scrollController: scrollController,
-              ),
+              viewportBuilder: (_, _) =>
+                  buildHandler(controller: target, attachment: attachment),
             ),
           ),
         );
@@ -497,9 +505,9 @@ void main() {
 
         await pointer.moveTo(const Offset(8, 64));
         await tester.pump();
-        final rowAfterMove = attachment.terminal.scrollbar.offset;
+        final rowAfterMove = target.scrollbar.offset;
         await tester.pump(const Duration(milliseconds: 120));
-        final viewportRow = attachment.terminal.scrollbar.offset;
+        final viewportRow = target.scrollbar.offset;
         await pointer.up();
         await tester.pump(const Duration(milliseconds: 250));
 
@@ -664,6 +672,29 @@ void main() {
       });
 
       testWidgets(
+        'controller notification preserves touch handles before movement',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          await tester.pumpWidget(buildHandler(controller: controller));
+          final gesture = await tester.startGesture(const Offset(40, 16));
+          await tester.pump(const Duration(milliseconds: 550));
+
+          controller.toggleMod(const Mods.ctrl());
+          await tester.pump();
+          await gesture.moveTo(const Offset(80, 32));
+          await gesture.up();
+          await tester.pump();
+          debugDefaultTargetPlatformOverride = null;
+
+          expect(
+            find.byKey(const ValueKey(SelectionEndpoint.start)),
+            findsOneWidget,
+          );
+        },
+      );
+
+      testWidgets(
         'touch move cancels long press if distance exceeds threshold',
         (tester) async {
           await tester.pumpWidget(buildHandler(controller: controller));
@@ -708,6 +739,30 @@ void main() {
     });
 
     group('gesture settings', () {
+      Future<TestGesture> startBlockLongPressHandleDrag(
+        WidgetTester tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(
+          buildHandler(
+            controller: controller,
+            gestureSettings: const TerminalGestureSettings(
+              longPressSelectionShape: .rectangle,
+            ),
+          ),
+        );
+        final selection = await tester.startGesture(const Offset(40, 16));
+        await tester.pump(const Duration(milliseconds: 550));
+        await selection.moveTo(const Offset(80, 32));
+        await selection.up();
+        await tester.pump();
+        final handle = find.byKey(const ValueKey(SelectionEndpoint.end));
+        debugDefaultTargetPlatformOverride = null;
+        final drag = await tester.startGesture(tester.getCenter(handle));
+        return drag;
+      }
+
       testWidgets('dragSelection false prevents drag selection', (
         tester,
       ) async {
@@ -895,25 +950,31 @@ void main() {
         expect(terminalFor(controller).selection, isNull);
       });
 
-      testWidgets('longPressSelectionShape block uses block mode', (
+      testWidgets('block long press follows inactive modifier during drag', (
         tester,
       ) async {
-        await tester.pumpWidget(
-          buildHandler(
-            controller: controller,
-            gestureSettings: const TerminalGestureSettings(
-              longPressSelectionShape: .rectangle,
-            ),
-          ),
-        );
-
-        final gesture = await tester.startGesture(const Offset(40, 16));
-        await tester.pump(const Duration(milliseconds: 550));
-        await gesture.moveTo(const Offset(80, 32));
-        await gesture.up();
+        final drag = await startBlockLongPressHandleDrag(tester);
+        await drag.moveBy(const Offset(8, 0));
+        await drag.up();
 
         final selection = terminalFor(controller).selection!;
-        expect(selection.mode, TerminalSelectionShape.rectangle);
+        expect(selection.mode, TerminalSelectionShape.normal);
+      });
+
+      testWidgets('modifier release changes a block long press to normal', (
+        tester,
+      ) async {
+        controller.toggleMod(const Mods.alt());
+        final drag = await startBlockLongPressHandleDrag(tester);
+
+        controller.toggleMod(const Mods.alt());
+        await drag.moveBy(const Offset(8, 0));
+        await drag.up();
+
+        expect(
+          terminalFor(controller).selection!.mode,
+          TerminalSelectionShape.normal,
+        );
       });
 
       testWidgets(
@@ -1196,7 +1257,7 @@ void main() {
           final replacement = TerminalController();
           addTearDown(replacement.dispose);
           writeToTerminal(replacement, 'selected');
-          bindingFor(replacement).handleResize(
+          bindingFor(replacement).commitGeometry(
             SurfaceMeasurement(
               cols: 80,
               rows: 24,
@@ -2043,10 +2104,7 @@ void main() {
             textDirection: TextDirection.ltr,
             child: Scrollable(
               controller: scrollController,
-              viewportBuilder: (_, _) => buildHandler(
-                controller: controller,
-                scrollController: scrollController,
-              ),
+              viewportBuilder: (_, _) => buildHandler(controller: controller),
             ),
           ),
         );

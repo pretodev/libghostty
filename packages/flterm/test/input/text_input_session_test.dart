@@ -64,34 +64,33 @@ void main() {
     tearDown(() => handler.detach());
 
     group('updateEditingValueWithDeltas', () {
-      test('recovers when a delta cannot apply to the sentinel value', () {
+      testWidgets('recovers invalid deltas after the frame', (tester) async {
         final calls = recordTextInputCalls();
         handler.ensureAttached();
         calls.clear();
 
-        // A platform that ignored our sentinel reset (e.g. iOS after an accent)
-        // can send a delta referencing offsets past our value. Applying it
-        // would throw; the session must recover instead of freezing.
-        expect(
-          () => handler.updateEditingValueWithDeltas([
-            const TextEditingDeltaDeletion(
-              oldText: 'abcde',
-              deletedRange: TextRange(start: 3, end: 5),
-              selection: TextSelection.collapsed(offset: 3),
-              composing: TextRange.empty,
-            ),
-          ]),
-          returnsNormally,
-        );
+        // Invalid offsets must refer beyond delta.oldText: Flutter applies
+        // deltas to oldText, not to the client's current sentinel value.
+        handler.updateEditingValueWithDeltas([
+          const TextEditingDeltaDeletion(
+            oldText: ' ',
+            deletedRange: TextRange(start: 3, end: 5),
+            selection: TextSelection.collapsed(offset: 1),
+            composing: TextRange.empty,
+          ),
+        ]);
 
-        // Channel stays alive and is resynced back to the sentinel.
         expect(handler.isAttached, isTrue);
+        expect(textInputSetClientCalls(calls), isEmpty);
+        expect(deletes, isEmpty);
+        await tester.pump();
+        expect(textInputSetClientCalls(calls), hasLength(1));
         expect(
-          calls.where((call) => call.method == 'TextInput.setEditingState'),
-          isNotEmpty,
+          calls.where((call) => call.method == 'TextInput.show'),
+          hasLength(1),
         );
+        expect(handler.currentTextEditingValue.text, ' ');
 
-        // Subsequent normal input still commits.
         handler.updateEditingValueWithDeltas([
           const TextEditingDeltaInsertion(
             oldText: ' ',
@@ -102,6 +101,73 @@ void main() {
           ),
         ]);
         expect(commits, ['x']);
+      });
+
+      for (final delta in <TextEditingDelta>[
+        const TextEditingDeltaInsertion(
+          oldText: ' ',
+          textInserted: 'é',
+          insertionOffset: 3,
+          selection: TextSelection.collapsed(offset: 2),
+          composing: TextRange.empty,
+        ),
+        const TextEditingDeltaReplacement(
+          oldText: ' ',
+          replacementText: 'é',
+          replacedRange: TextRange(start: 3, end: 5),
+          selection: TextSelection.collapsed(offset: 2),
+          composing: TextRange.empty,
+        ),
+      ]) {
+        testWidgets('salvages composed text from ${delta.runtimeType}', (
+          tester,
+        ) async {
+          final calls = recordTextInputCalls();
+          handler.ensureAttached();
+          final preedit = <String>[];
+          handler.onPreeditChanged = preedit.add;
+          handler.updateEditingValue(
+            const TextEditingValue(
+              text: ' e',
+              selection: TextSelection.collapsed(offset: 2),
+              composing: TextRange(start: 1, end: 2),
+            ),
+          );
+          preedit.clear();
+          calls.clear();
+
+          handler.updateEditingValueWithDeltas([delta]);
+
+          expect(commits, ['é']);
+          expect(preedit, ['']);
+          expect(handler.hasActiveComposition, isFalse);
+          expect(textInputSetClientCalls(calls), isEmpty);
+          await tester.pump();
+          expect(textInputSetClientCalls(calls), hasLength(1));
+          expect(commits, ['é']);
+        });
+      }
+
+      testWidgets('does not reopen a detached session after recovery', (
+        tester,
+      ) async {
+        final calls = recordTextInputCalls();
+        handler.ensureAttached();
+        handler.updateEditingValueWithDeltas([
+          const TextEditingDeltaDeletion(
+            oldText: ' ',
+            deletedRange: TextRange(start: 3, end: 5),
+            selection: TextSelection.collapsed(offset: 1),
+            composing: TextRange.empty,
+          ),
+        ]);
+        handler.detach();
+        calls.clear();
+
+        await tester.pump();
+
+        expect(handler.isAttached, isFalse);
+        expect(textInputSetClientCalls(calls), isEmpty);
       });
 
       test('commits inserted text', () {
@@ -1049,6 +1115,19 @@ void main() {
         handler.ensureAttached();
 
         expect(textInputSetClientCalls(calls), hasLength(1));
+      });
+
+      test('preserves keyboard appearance when omitted', () {
+        final calls = recordTextInputCalls();
+        handler.ensureAttached(keyboardAppearance: Brightness.light);
+        calls.clear();
+
+        handler.ensureAttached();
+
+        expect(
+          textInputUpdateConfig(calls)['keyboardAppearance'],
+          Brightness.light.toString(),
+        );
       });
 
       test('reopens a connection orphaned by another client', () {

@@ -4,6 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+/// Publishes editable-box geometry and its root transform for text input.
+typedef TextInputGeometryChanged =
+    void Function({
+      required Size editableSize,
+      required Matrix4 transform,
+      required Rect caretRect,
+      required Rect composingRect,
+    });
+
 /// Flutter text input connection for terminal editing.
 ///
 /// The terminal has no editable text buffer, so this client keeps a sentinel
@@ -130,8 +139,8 @@ final class TextInputSession with DeltaTextInputClient {
   @override
   void didChangeInputControl(TextInputControl? _, TextInputControl? _) {}
 
-  void ensureAttached({Brightness keyboardAppearance = .dark}) {
-    _keyboardAppearance = keyboardAppearance;
+  void ensureAttached({Brightness? keyboardAppearance}) {
+    if (keyboardAppearance != null) _keyboardAppearance = keyboardAppearance;
     final connection = _connection;
     if (connection == null) return _openConnection();
     if (!connection.attached) {
@@ -175,7 +184,7 @@ final class TextInputSession with DeltaTextInputClient {
   void removeTextPlaceholder() {}
 
   void show() {
-    ensureAttached(keyboardAppearance: _keyboardAppearance);
+    ensureAttached();
     _connection?.show();
   }
 
@@ -477,6 +486,9 @@ final class TextInputSession with DeltaTextInputClient {
       _openConnection();
       _connection?.show();
     });
+    // Input can fail while the terminal is idle, with no frame pending.
+    // Registering a post-frame callback alone does not request a frame.
+    SchedulerBinding.instance.ensureVisualUpdate();
   }
 
   void _resetInputState() {

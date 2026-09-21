@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flterm/src/controller/terminal_controller.dart';
 import 'package:flterm/src/foundation.dart';
+import 'package:flterm/src/input/selection_session.dart' show SelectionEndpoint;
 import 'package:flterm/src/links/link_settings.dart';
 import 'package:flterm/src/rendering.dart';
 import 'package:flterm/src/view/terminal_scope.dart';
@@ -69,7 +71,7 @@ void main() {
     }
 
     Terminal terminal(TerminalController controller) {
-      return (controller as TerminalControllerImpl).terminal;
+      return (controller as TerminalSession).terminal;
     }
 
     Selection? activeSelection(TerminalController controller) {
@@ -167,8 +169,10 @@ void main() {
       double width = 800,
       double height = 480,
       Uint8List? fontData,
+      TargetPlatform? platform,
     }) {
       return MaterialApp(
+        theme: platform == null ? null : ThemeData(platform: platform),
         home: Scaffold(
           body: SizedBox(
             width: width,
@@ -228,6 +232,87 @@ void main() {
     setUp(() => controller = TerminalController());
 
     tearDown(() => controller.dispose());
+
+    group('snapshot restoration', () {
+      void replaceWithHistorySnapshot({int lineCount = 10000}) {
+        final source = Terminal(cols: 12, rows: 3)
+          ..scrollbackMaxBytes = null
+          ..scrollbackMaxLines = null;
+        addTearDown(source.dispose);
+        source.write(
+          utf8.encode(
+            List.generate(lineCount, (index) => 'line$index').join('\r\n'),
+          ),
+        );
+        controller.dispose();
+        controller = TerminalController.fromSnapshot(source.encodeSnapshot());
+      }
+
+      testWidgets('renders the saved grid while history loads', (tester) async {
+        replaceWithHistorySnapshot();
+
+        await tester.pumpWidget(wrapInApp(controller: controller));
+
+        final renderBox = tester.renderObject<TerminalRenderBox>(
+          find.byType(TerminalRenderer),
+        );
+        expect(renderBox.debugGridSize, (cols: 12, rows: 3));
+
+        controller.dispose();
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      testWidgets('commits the measured grid after restoration', (
+        tester,
+      ) async {
+        replaceWithHistorySnapshot();
+        await tester.pumpWidget(wrapInApp(controller: controller));
+
+        await tester.pumpAndSettle();
+
+        final renderBox = tester.renderObject<TerminalRenderBox>(
+          find.byType(TerminalRenderer),
+        );
+        expect(renderBox.debugGridSize, isNot((cols: 12, rows: 3)));
+      });
+
+      testWidgets(
+        'keeps the visible scrollback row anchored as history arrives',
+        (tester) async {
+          replaceWithHistorySnapshot();
+          final scrollController = TerminalScrollController();
+          addTearDown(scrollController.dispose);
+          await tester.pumpWidget(
+            wrapInApp(
+              controller: controller,
+              scrollController: scrollController,
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 1));
+          final cellHeight = tester
+              .widget<TerminalRenderer>(find.byType(TerminalRenderer))
+              .metrics
+              .cellHeight;
+          scrollController.jumpTo(
+            scrollController.position.maxScrollExtent / 2,
+          );
+          await tester.pump();
+          final pixelsBefore = scrollController.position.pixels;
+          final rowsBefore = controller.scrollbackRows;
+
+          await tester.pump(const Duration(milliseconds: 1));
+
+          final addedRows = controller.scrollbackRows - rowsBefore;
+          expect(
+            scrollController.position.pixels,
+            closeTo(pixelsBefore + addedRows * cellHeight, 0.01),
+          );
+
+          controller.dispose();
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+    });
 
     void writeNumberedLines(int count) {
       for (var i = 0; i < count; i++) {
@@ -322,6 +407,49 @@ void main() {
       expect(cols, isNotEmpty);
       expect(cols.last, greaterThan(0));
       expect(rows.last, greaterThan(0));
+    });
+
+    testWidgets('sizes a pinned Kitty placement during first layout', (
+      tester,
+    ) async {
+      final kittyController = TerminalController(
+        config: const TerminalConfig(cursorBlink: false),
+      );
+      addTearDown(kittyController.dispose);
+      final fontData = File(
+        'test/fixtures/fonts/JetBrainsMono-Regular.ttf',
+      ).readAsBytesSync();
+      const payload = '/wAA';
+      kittyController.write(
+        Uint8List.fromList(
+          '\x1b_Gf=24,s=1,v=1,a=T,i=1,c=1,r=1;$payload\x1b\\'.codeUnits,
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 800,
+              height: 480,
+              child: TerminalView(
+                controller: kittyController,
+                padding: EdgeInsets.zero,
+                fontData: fontData,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final nativeTerminal = terminal(kittyController);
+      final placement = KittyGraphics.of(nativeTerminal)!.placements().single;
+      final geometry = nativeTerminal.geometry;
+      expect(
+        (placement.renderInfo.pixelWidth, placement.renderInfo.pixelHeight),
+        (geometry.widthPx ~/ geometry.cols, geometry.heightPx ~/ geometry.rows),
+      );
     });
 
     testWidgets('geometry uses the Flutter view device pixel ratio', (
@@ -1124,6 +1252,68 @@ void main() {
       expect(expected.top, greaterThan(0));
     });
 
+    group('text input geometry', () {
+      testWidgets('follows ancestor transforms without terminal changes', (
+        tester,
+      ) async {
+        final calls = recordTextInputCalls();
+        final translation = ValueNotifier(Offset.zero);
+        addTearDown(translation.dispose);
+        await tester.pumpWidget(
+          ValueListenableBuilder<Offset>(
+            valueListenable: translation,
+            child: RepaintBoundary(
+              child: wrapInApp(controller: controller, autofocus: true),
+            ),
+            builder: (context, offset, child) =>
+                Transform.translate(offset: offset, child: child),
+          ),
+        );
+        await tester.pump();
+        final before =
+            lastTextInputCall(
+                  calls,
+                  'TextInput.setEditableSizeAndTransform',
+                )['transform']!
+                as List<Object?>;
+        calls.clear();
+
+        translation.value = const Offset(21, 34);
+        await tester.pump();
+
+        final after =
+            lastTextInputCall(
+                  calls,
+                  'TextInput.setEditableSizeAndTransform',
+                )['transform']!
+                as List<Object?>;
+        expect(after[12], (before[12]! as num) + 21);
+        expect(after[13], (before[13]! as num) + 34);
+      });
+
+      testWidgets('follows cursor movement from backend output', (
+        tester,
+      ) async {
+        final calls = recordTextInputCalls();
+        await tester.pumpWidget(
+          wrapInApp(controller: controller, autofocus: true),
+        );
+        await tester.pump();
+
+        writeUtf8(controller, '\x1b[4;8H');
+        await tester.pump();
+
+        final renderBox = tester.renderObject<TerminalRenderBox>(
+          find.byType(TerminalRenderer),
+        );
+        final caret = lastTextInputCall(calls, 'TextInput.setCaretRect');
+        expect(
+          Offset(caret['x']! as double, caret['y']! as double),
+          renderBox.textInputCaretRect.topLeft,
+        );
+      });
+    });
+
     group('unmount', () {
       testWidgets('clears focus state', (tester) async {
         final focusNode = FocusNode();
@@ -1630,7 +1820,7 @@ void main() {
         await tester.pump();
 
         expect(
-          renderer(tester).linkSnapshot.highlighted,
+          renderer(tester).links!.snapshot().highlighted,
           const CellRange(
             start: Position(row: 0, col: 0),
             end: Position(row: 0, col: 19),
@@ -1689,6 +1879,124 @@ void main() {
       final sel = activeSelection(controller);
       expect(sel, isNotNull);
       expect(sel!.mode, TerminalSelectionShape.normal);
+    });
+
+    group('touch selection handles', () {
+      const startHandle = ValueKey(SelectionEndpoint.start);
+      const endHandle = ValueKey(SelectionEndpoint.end);
+
+      Future<void> pumpSubject(
+        WidgetTester tester, {
+        TerminalGestureSettings settings = const TerminalGestureSettings(),
+        TerminalScrollController? scrollController,
+      }) async {
+        writeUtf8(controller, 'alpha bravo charlie delta echo foxtrot golf');
+        await tester.pumpWidget(
+          wrapInApp(
+            controller: controller,
+            gestureSettings: settings,
+            scrollController: scrollController,
+            showKeyboard: false,
+            platform: TargetPlatform.android,
+            width: 320,
+            height: 96,
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> createTouchSelection(WidgetTester tester) async {
+        final origin = tester.getTopLeft(find.byType(TerminalView));
+        final gesture = await tester.startGesture(
+          origin + const Offset(24, 16),
+        );
+        await tester.pump(const Duration(milliseconds: 600));
+        await gesture.moveBy(const Offset(96, 24));
+        await gesture.up();
+        await tester.pump();
+        await tester.pump();
+      }
+
+      testWidgets('shows both handles after long-press selection', (
+        tester,
+      ) async {
+        await pumpSubject(tester);
+
+        await createTouchSelection(tester);
+
+        expect(find.byKey(startHandle), findsOneWidget);
+        expect(find.byKey(endHandle), findsOneWidget);
+      });
+
+      testWidgets('keeps handles hidden when disabled', (tester) async {
+        await pumpSubject(
+          tester,
+          settings: const TerminalGestureSettings(touchSelectionHandles: false),
+        );
+
+        await createTouchSelection(tester);
+
+        expect(find.byKey(startHandle), findsNothing);
+      });
+
+      testWidgets('keeps handles hidden after mouse selection', (tester) async {
+        await pumpSubject(tester);
+        final origin = tester.getTopLeft(find.byType(TerminalView));
+        final gesture = await tester.startGesture(
+          origin + const Offset(24, 16),
+          kind: PointerDeviceKind.mouse,
+        );
+
+        await gesture.moveBy(const Offset(96, 24));
+        await gesture.up();
+        await tester.pump();
+
+        expect(find.byKey(startHandle), findsNothing);
+      });
+
+      testWidgets('hides handles after programmatic selection', (tester) async {
+        await pumpSubject(tester);
+        await createTouchSelection(tester);
+
+        controller.selectRange(
+          start: const Position(row: 0, col: 0),
+          end: const Position(row: 0, col: 0),
+          pointTag: PointTag.viewport,
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.byKey(startHandle), findsNothing);
+      });
+
+      testWidgets('moves both handles with terminal viewport scrolling', (
+        tester,
+      ) async {
+        final scrollController = TerminalScrollController();
+        addTearDown(scrollController.dispose);
+        writeNumberedLines(80);
+        await pumpSubject(tester, scrollController: scrollController);
+        await createTouchSelection(tester);
+        final before = (
+          start: tester.getCenter(find.byKey(startHandle)),
+          end: tester.getCenter(find.byKey(endHandle)),
+        );
+        final cellHeight = renderer(tester).metrics.cellHeight;
+
+        scrollController.jumpTo(scrollController.offset - cellHeight);
+        await tester.pump();
+
+        expect(
+          (
+            start: tester.getCenter(find.byKey(startHandle)),
+            end: tester.getCenter(find.byKey(endHandle)),
+          ),
+          (
+            start: before.start.translate(0, cellHeight),
+            end: before.end.translate(0, cellHeight),
+          ),
+        );
+      });
     });
 
     group('scrolling', () {
@@ -1764,10 +2072,7 @@ void main() {
         await tester.pump();
 
         final position = scrollController.position;
-        expect(
-          (position as ScrollbackPosition).activeScreen,
-          TerminalScreen.alternate,
-        );
+        expect(scrollController.activeScreen, TerminalScreen.alternate);
         expect(position.minScrollExtent, double.negativeInfinity);
         expect(position.maxScrollExtent, double.infinity);
       });
@@ -2946,6 +3251,35 @@ void main() {
       tearDown(() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      testWidgets('cancels pending paste when the controller changes', (
+        tester,
+      ) async {
+        final clipboard = Completer<Object?>();
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async => call.method == 'Clipboard.getData'
+              ? await clipboard.future
+              : null,
+        );
+        final replacement = TerminalController();
+        addTearDown(replacement.dispose);
+        final output = <Uint8List>[];
+        replacement.onOutput = output.add;
+        await tester.pumpWidget(
+          wrapInApp(controller: controller, autofocus: true),
+        );
+        await tester.pump();
+        await sendPasteShortcut(tester);
+
+        await tester.pumpWidget(
+          wrapInApp(controller: replacement, autofocus: true),
+        );
+        clipboard.complete({'text': 'stale paste'});
+        await tester.pump();
+
+        expect(decodeOutput(output), isNot(contains('stale paste')));
       });
 
       testWidgets('paste shortcut sends clipboard text to onOutput', (

@@ -97,8 +97,13 @@ void main() {
       bool focused = true,
     }) async {
       selection?.applyTo(terminal);
-      final frameSource = FrameSource(terminal);
-      addTearDown(frameSource.dispose);
+      final frameChanges = ChangeNotifier();
+      void onTerminalChanged() => frameChanges.notifyListeners();
+      terminal.addListener(onTerminalChanged);
+      addTearDown(() {
+        terminal.removeListener(onTerminalChanged);
+        frameChanges.dispose();
+      });
       final resolvedTheme = theme ?? emojiTheme;
       applyTerminalTheme(terminal, resolvedTheme);
       final width = cols * metrics.cellWidth;
@@ -118,13 +123,14 @@ void main() {
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: width, maxHeight: height),
               child: TerminalRenderer(
-                frameSource: frameSource,
+                terminal: terminal,
+                frameChanges: frameChanges,
                 theme: resolvedTheme,
                 metrics: metrics,
                 offset: ViewportOffset.zero(),
                 atlasPool: atlasPool(),
                 focused: focused,
-                onGeometryChanged: (_) {},
+                onGeometryChanged: SurfaceGeometry.tryFrom,
                 onViewportRowChanged: (_) {},
               ),
             ),
@@ -300,7 +306,7 @@ void main() {
       });
     });
 
-    group('Cursor on emoji', () {
+    group('RenderStateCursor on emoji', () {
       testWidgets('block cursor on standard wide emoji', (tester) async {
         final terminal = Terminal(cols: defaultCols, rows: defaultRows);
         addTearDown(terminal.dispose);
