@@ -11,6 +11,7 @@ Both upstream and the previous Cockpit history are retained by the merge.
 | Recover invalid IME deltas, salvage committed text, and reopen after the frame | `6ddbcad`, `3dc78a4`, `09b7186` | `packages/flterm/lib/src/input/text_input_session.dart` |
 | Leave desktop dead keys to IME composition under Kitty | `9be6780` | `packages/flterm/lib/src/view/view_attachment.dart` |
 | Leave desktop Super/Cmd + character shortcuts to the application | `0136792` | `packages/flterm/lib/src/view/view_attachment.dart` |
+| Encode Ctrl+Space as a control chord under Kitty, not a plain space | (this branch) | `packages/flterm/lib/src/foundation/platform_map.dart` |
 
 The old `KeyboardInputAdapter` was removed upstream. Its local guards now run
 before composition routing and terminal encoding in `ViewAttachment`. Ctrl
