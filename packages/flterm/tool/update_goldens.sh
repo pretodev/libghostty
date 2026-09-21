@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Regenerate flterm golden test images inside the same Docker image CI uses
-# (`ghcr.io/cirruslabs/flutter:stable`, see .github/workflows/checks.yml).
+# (`ghcr.io/cirruslabs/flutter:3.44.0`, see .github/workflows/checks.yml).
 #
 # Why a container: Skia text rasterization on Linux depends on the system
 # libfreetype/libpng build, which differs across distros, security updates,
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-readonly IMAGE='ghcr.io/cirruslabs/flutter:stable'
+readonly IMAGE='ghcr.io/cirruslabs/flutter:3.44.0'
 
 repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 

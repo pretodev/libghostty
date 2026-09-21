@@ -1,7 +1,7 @@
 tags:
   ffi:
     test_on: vm
-  # Goldens are byte-pinned to the cirruslabs/flutter:stable image (see
+  # Goldens are byte-pinned to the cirruslabs/flutter:3.44.0 image (see
   # tool/update_goldens.sh). Skia text rasterization differs across host
   # libfreetype/libpng builds, so they only match on Linux. Local devs on
   # other platforms can run `flutter test --tags golden` inside that
